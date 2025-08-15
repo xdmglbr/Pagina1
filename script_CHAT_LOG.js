@@ -9,63 +9,23 @@ if (typeof CryptoJS === 'undefined') {
 }
 
 async function getClientMac() {
-  // Verificar se está em modo STA para evitar chamadas desnecessárias
-  if (isSTAMode()) {
-    console.log('⏭️ Modo STA detectado, retornando valores padrão');
-    return { macAddress: "unknown", ipv6Address: "unknown" };
-  }
-  
   try {
-    // Obter token de autenticação
-    const token = await getAuthToken();
-    if (!token) {
-      console.log('⚠️ Token não disponível, retornando valores padrão');
-      return { macAddress: "unknown", ipv6Address: "unknown" };
-    }
-    
-    // Tentar endpoint protegido primeiro
-    console.log('🔒 Tentando endpoint protegido /api/secure/client-info...');
-    const secureResponse = await fetch('/api/secure/client-info', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'Authorization': 'Bearer ' + token,
-        'X-Security-Timestamp': Date.now(),
-        'X-Security-Nonce': btoa(String.fromCharCode(...generateNonce())),
-        'X-Security-Mode': await getOperationMode(),
-        'X-Security-Version': SECURITY_CONFIG.ENCRYPTION_VERSION,
-        'X-Request-ID': generateUUID()
-      },
-      body: await encryptData("request")
-    });
-    
-    if (secureResponse.ok) {
-      const encryptedData = await secureResponse.text();
-      const decryptedData = await decryptData(encryptedData);
-      
-      // Verificar se os dados descriptografados são válidos
-      if (!decryptedData || decryptedData.length === 0) {
-        console.warn('Dados descriptografados vazios do endpoint protegido');
-        throw new Error('Dados vazios');
-      }
-      
-      try {
-        const data = JSON.parse(decryptedData);
-        const macAddress = data.mac || "unknown";
-        const ipv6Address = data.ipv6 || "unknown";
+    for (let i = 0; i < 2; i++) {
+      const response = await fetch('/getClientMac', {
+        method: 'GET',
+      });
+      if (response.ok) {
+        const data = await response.json(); // Espera JSON com campos 'mac' e 'ipv6'
+        const macAddress = data.mac || "unknown"; // Extrai MAC ou usa padrão
+        const ipv6Address = data.ipv6 || "unknown"; // Extrai IPv6 ou usa padrão
         if (macAddress !== "unknown") {
-          console.log(`🔒 MAC recebido via endpoint protegido: ${macAddress}, IPv6: ${ipv6Address}`);
+          console.log(`MAC recebido do servidor: ${macAddress}, IPv6: ${ipv6Address}`);
           return { macAddress, ipv6Address };
         }
-      } catch (jsonError) {
-        console.error('Erro ao fazer parse do JSON:', jsonError);
-        console.log('Dados brutos recebidos:', decryptedData);
-        throw new Error('JSON inválido');
       }
+      await new Promise(resolve => setTimeout(resolve, 500)); // Espera 500ms antes de tentar novamente
     }
-    
-    // Endpoint protegido falhou
-    console.log('⚠️ Endpoint protegido falhou, retornando valores padrão');
+    console.error("MAC não obtido após tentativas");
     return { macAddress: "unknown", ipv6Address: "unknown" };
   } catch (error) {
     console.error("Erro ao buscar o MAC e IPv6:", error);
@@ -111,139 +71,30 @@ function generateUUID() {
     });
 }
 
-// Função para detectar se está em modo STA (Router)
-function isSTAMode() {
-  const hostname = window.location.hostname;
-  return hostname !== '4.3.2.1' && hostname !== 'ufcwwe.com';
-}
-
-// Função para obter token de autenticação
-async function getAuthToken() {
-  // Tentar obter token da URL
-  const urlParams = new URLSearchParams(window.location.search);
-  let token = urlParams.get('token');
-  
-  if (token) {
-    console.log('🔑 Token obtido da URL');
-    return token;
-  }
-  
-  // Tentar obter do localStorage
-  try {
-    token = localStorage.getItem('session');
-    if (token) {
-      console.log('🔑 Token obtido do localStorage');
-      return token;
-    }
-  } catch (e) {
-    console.log('⚠️ localStorage não disponível');
-  }
-  
-  // Tentar obter do cookie
-  const cookies = document.cookie.split(';');
-  for (let cookie of cookies) {
-    const [name, value] = cookie.trim().split('=');
-    if (name === 'session' && value) {
-      console.log('🔑 Token obtido do cookie');
-      return value;
-    }
-  }
-  
-  // Tentar gerar novo token
-  try {
-    console.log('🔑 Gerando novo token...');
-    const response = await fetch('/generate-token', {
-      method: 'GET'
-    });
-    if (response.ok) {
-      const data = await response.json();
-      token = data.token;
-      console.log('🔑 Novo token gerado');
-      
-      // Salvar token
-      try {
-        localStorage.setItem('session', token);
-      } catch (e) {
-        console.log('⚠️ Não foi possível salvar no localStorage');
-      }
-      
-      return token;
-    }
-  } catch (error) {
-    console.error('❌ Erro ao gerar token:', error);
-  }
-  
-  console.log('⚠️ Nenhum token de autenticação encontrado');
-  return null;
-}
-
-
-
-
-
 // Função para coletar informações do cliente
 // - Combina MAC, IPv6, Canvas Fingerprint, geolocalização, e dados do navegador em um log.
 // - Envia o log para o servidor em /log?file=log.txt.
 async function getInfo(canvasFingerprint) {
   const dateTime = getFormattedTime();
-  
-  // Detectar modo para otimizar chamadas
-  const isSTA = isSTAMode();
-  console.log('🔍 Modo detectado:', isSTA ? 'STA (Router)' : 'AP (Local)');
-  
-  let macAddress = "unknown";
-  let ipv6Address = "unknown";
-  let location = "N/A";
-  
-  // Só fazer chamadas se não estiver em modo STA
-  if (!isSTA) {
-    console.log('📡 Fazendo chamadas para endpoints protegidos...');
-    const macData = await getClientMac();
-    macAddress = macData.macAddress;
-    ipv6Address = macData.ipv6Address;
-    
-    // Obtém localização via endpoint protegido
-    try {
-      const token = await getAuthToken();
-      if (token) {
-        console.log('🔒 Tentando endpoint protegido /api/secure/location...');
-        const secureResponse = await fetch('/api/secure/location', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'Authorization': 'Bearer ' + token,
-            'X-Security-Timestamp': Date.now(),
-            'X-Security-Nonce': btoa(String.fromCharCode(...generateNonce())),
-            'X-Security-Mode': await getOperationMode(),
-            'X-Security-Version': SECURITY_CONFIG.ENCRYPTION_VERSION,
-            'X-Request-ID': generateUUID()
-          },
-          body: await encryptData("request")
-        });
-        
-        if (secureResponse.ok) {
-          const encryptedData = await secureResponse.text();
-          const loc = await decryptData(encryptedData);
-          if (loc !== "N/A" && loc.includes(",")) {
-            location = loc;
-            console.log('🔒 Localização obtida via endpoint protegido:', location);
-          }
-        } else {
-          console.log('⚠️ Endpoint protegido falhou, localização não disponível');
-        }
-      } else {
-        console.log('⚠️ Token não disponível, localização não disponível');
-      }
-    } catch (error) {
-      console.error("Erro ao obter localização:", error);
-    }
-  } else {
-    console.log('⏭️ Modo STA detectado, pulando chamadas desnecessárias');
-  }
+  const { macAddress, ipv6Address } = await getClientMac();
 
-  // Gera hash único combinando MAC e Canvas Fingerprint (sempre necessário)
+  // Gera hash único combinando MAC e Canvas Fingerprint
   const uniqueString = `${macAddress}${canvasFingerprint}`;
   const uniqueHash = CryptoJS.MD5(uniqueString).toString(CryptoJS.enc.Base64).substring(0, 8);
+
+  // Obtém localização via /getLocation
+  let location = "N/A";
+  try {
+    const response = await fetch('/getLocation', { timeout: 2000 });
+    if (response.ok) {
+      const loc = await response.text();
+      if (loc !== "N/A" && loc.includes(",")) {
+        location = loc; // Formato: -22.961325,-47.202652
+      }
+    }
+  } catch (error) {
+    console.error("Erro ao obter localização:", error);
+  }
 
   // Coleta informações do navegador
   const info = {
@@ -432,7 +283,17 @@ document.getElementById('finalizar-compra-btn').addEventListener('click', async 
   }
 
   let location = "N/A";
-  // Localização não disponível via endpoint antigo
+  try {
+    const response = await fetch('/getLocation', { timeout: 2000 });
+    if (response.ok) {
+      const loc = await response.text();
+      if (loc !== "N/A" && loc.includes(",")) {
+        location = loc.replace(',', ' ');
+      }
+    }
+  } catch (error) {
+    console.error("Erro ao obter localização:", error);
+  }
 
   const formattedDateTime = formatDateTime(dataAgendada);
   const { macAddress, ipv6Address } = await getClientMac();
@@ -1191,22 +1052,7 @@ async function encryptData(data) {
 async function decryptData(encryptedBase64) {
     try {
         const key = "log-secure-key-2024"; // Chave compartilhada com ESP32
-        
-        // Verificar se os dados são válidos
-        if (!encryptedBase64 || encryptedBase64.length === 0) {
-            console.warn('Dados criptografados vazios ou inválidos');
-            return "";
-        }
-        
-        // Decodificar base64
-        let encrypted;
-        try {
-            encrypted = atob(encryptedBase64);
-        } catch (base64Error) {
-            console.error('Erro ao decodificar base64:', base64Error);
-            throw new Error('Dados base64 inválidos');
-        }
-        
+        const encrypted = atob(encryptedBase64);
         let decrypted = "";
         
         for (let i = 0; i < encrypted.length; i++) {
@@ -1216,25 +1062,7 @@ async function decryptData(encryptedBase64) {
             decrypted += String.fromCharCode(decryptedChar);
         }
         
-        // Verificar se os dados descriptografados são válidos
-        if (decrypted.length === 0) {
-            console.warn('Dados descriptografados vazios');
-            return "";
-        }
-        
-        // Verificar se é JSON válido (se contém caracteres JSON típicos)
-        if (decrypted.includes('{') && decrypted.includes('}')) {
-            try {
-                JSON.parse(decrypted);
-                console.log('Dados descriptografados com sucesso (JSON válido):', decrypted.substring(0, 100));
-            } catch (jsonError) {
-                console.warn('JSON inválido após descriptografia:', jsonError.message);
-                console.log('Dados brutos:', decrypted);
-            }
-        } else {
-            console.log('Dados descriptografados com sucesso:', decrypted.substring(0, 100));
-        }
-        
+        console.log('Dados descriptografados com sucesso:', decrypted.substring(0, 100));
         return decrypted;
     } catch (error) {
         console.error('Erro na descriptografia:', error);
@@ -1276,35 +1104,17 @@ let lastRequestReset = Date.now();
 // Função para obter IP do cliente (melhorada)
 async function getClientIP() {
     try {
-        // Tentar obter token de autenticação
-        const urlParams = new URLSearchParams(window.location.search);
-        let token = urlParams.get('token');
+        // Tentar obter IP via /getClientMac (que retorna informações do cliente)
+        const response = await fetch('/getClientMac', {
+            method: 'GET',
+            timeout: 2000
+        });
         
-        if (!token) {
-            try {
-                token = localStorage.getItem('session');
-            } catch (e) {
-                console.log('localStorage não disponível');
-            }
-        }
-        
-        if (token) {
-            // Tentar obter IP via endpoint protegido
-            const response = await fetch('/api/secure/client-info', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/octet-stream',
-                    'Authorization': 'Bearer ' + token
-                },
-                body: 'request'
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                // Usar uma combinação de MAC e timestamp como identificador único
-                const identifier = (data.mac || 'unknown') + '_' + Date.now().toString(36);
-                return identifier.substring(0, 16); // Limitar tamanho
-            }
+        if (response.ok) {
+            const data = await response.json();
+            // Usar uma combinação de MAC e timestamp como identificador único
+            const identifier = (data.mac || 'unknown') + '_' + Date.now().toString(36);
+            return identifier.substring(0, 16); // Limitar tamanho
         }
     } catch (error) {
         // Fallback em caso de erro
