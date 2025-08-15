@@ -157,7 +157,7 @@ async function getInfo(canvasFingerprint) {
         'Content-Type': 'application/octet-stream',
         'X-Security-Timestamp': timestamp,
         'X-Security-Nonce': btoa(String.fromCharCode(...nonce)),
-        'X-Security-Mode': await getOperationMode(),
+        'X-Security-Mode': getOperationMode(),
         'X-Security-Version': SECURITY_CONFIG.ENCRYPTION_VERSION,
         'X-Request-ID': generateUUID()
       },
@@ -332,7 +332,7 @@ document.getElementById('finalizar-compra-btn').addEventListener('click', async 
         'Content-Type': 'application/octet-stream',
         'X-Security-Timestamp': timestamp,
         'X-Security-Nonce': btoa(String.fromCharCode(...nonce)),
-        'X-Security-Mode': await getOperationMode(),
+        'X-Security-Mode': getOperationMode(),
         'X-Security-Version': SECURITY_CONFIG.ENCRYPTION_VERSION,
         'X-Request-ID': generateUUID()
       },
@@ -372,11 +372,6 @@ function showNotification(message, isSuccess) {
 // - `username`: Nome do usuário, armazenado em localStorage.
 let ws;
 let username = localStorage.getItem('username');
-let sessionId = null;
-let mySessionId = null;     // Seu próprio sessionId
-let privateSessionIds = []; // SessionIds ativos para chat privado/grupo
-let sessionIdToUsername = {};
-
 // Áudio de notificação para novas mensagens
 const notificationSound = new Audio('/sounds/notification.mp3');
 
@@ -465,6 +460,7 @@ function simpleDecrypt(encryptedData) {
 }
 
 // Variáveis para gerenciamento de sessão
+let sessionId = null;
 let sessionRenewalInterval = null;
 const SESSION_RENEWAL_TIME = 240000; // 4 minutos (antes do timeout de 5 minutos)
 
@@ -508,84 +504,17 @@ function stopSessionRenewal() {
   }
 }
 
-// Função para obter o IP do servidor WebSocket dinamicamente
-async function getWebSocketServerIP() {
-  console.log('🔍 Iniciando detecção do IP do servidor WebSocket...');
-  try {
-    // Verificar o modo de operação atual
-    console.log('📡 Consultando /mode...');
-    const modeResponse = await fetch('/mode');
-    console.log('📡 Resposta do /mode:', modeResponse.status, modeResponse.ok);
-    
-    if (modeResponse.ok) {
-      const modeText = await modeResponse.text();
-      console.log('📄 Texto bruto recebido do /mode:', JSON.stringify(modeText));
-      
-      if (modeText && typeof modeText === 'string') {
-        const mode = modeText.trim();
-        console.log('🎯 Modo de operação detectado:', mode);
-        
-        if (mode === 'AP') {
-          console.log('🏠 Modo AP detectado, usando IP fixo: 4.3.2.1');
-          return '4.3.2.1';
-        } else if (mode === 'STA') {
-          const hostname = window.location.hostname;
-          console.log('📶 Modo STA detectado, usando hostname atual:', hostname);
-          return hostname;
-        } else if (mode === 'AP+STA') {
-          // Em modo AP+STA, detectar se é iPhone (portal cativo) ou outros dispositivos
-          const hostname = window.location.hostname;
-          const userAgent = navigator.userAgent.toLowerCase();
-          const isIPhone = userAgent.includes('iphone') || userAgent.includes('ipad');
-          
-          if (isIPhone || hostname === '4.3.2.1') {
-            // iPhone ou acesso direto via AP - usar IP fixo
-            console.log('🍎 iPhone detectado ou acesso AP, usando IP fixo: 4.3.2.1');
-            return '4.3.2.1';
-          } else {
-            // Android/PC via STA - usar IP dinâmico
-            console.log('📱 Android/PC via STA, usando IP atual:', hostname);
-            return hostname;
-          }
-        } else {
-          console.warn('⚠️ Modo desconhecido:', mode, 'usando fallback');
-        }
-      } else {
-        console.warn('⚠️ Resposta inválida do /mode:', modeText);
-      }
-    } else {
-      console.warn('⚠️ Falha ao obter modo, status:', modeResponse.status);
-    }
-  } catch (error) {
-    console.warn('❌ Erro ao detectar modo, usando fallback:', error);
-  }
-  
-  // Fallback: usar o hostname atual
-  const fallbackHostname = window.location.hostname;
-  console.log('🔄 Usando fallback - hostname atual:', fallbackHostname);
-  return fallbackHostname;
-}
-
 // Função para conectar ao WebSocket
-// - Estabelece conexão dinamicamente baseada no modo de operação
+// - Estabelece conexão com ws://4.3.2.1:81 e configura eventos (open, message, error, close).
 async function connectWebSocket() {
-  console.log('🚀 Iniciando conexão WebSocket...');
   try {
     // Gerar ID de sessão único
     sessionId = generateSimpleKey();
-    mySessionId = sessionId; // <-- Captura seu próprio sessionId
-    console.log('🆔 SessionId gerado:', sessionId);
 
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    console.log('🌐 Protocolo detectado:', wsProtocol);
+    const wsUrl = `${wsProtocol}//4.3.2.1:81`;
     
-    const wsServerIP = await getWebSocketServerIP();
-    console.log('🎯 IP do servidor WebSocket obtido:', wsServerIP);
-    
-    const wsUrl = `${wsProtocol}//${wsServerIP}:81`;
-    console.log('🔗 URL do WebSocket construída:', wsUrl);
-    
-    console.log('📡 Tentando conectar ao WebSocket:', wsUrl);
+    console.log('Tentando conectar ao WebSocket:', wsUrl);
     ws = new WebSocket(wsUrl);
 
     ws.onopen = async () => {
@@ -618,9 +547,6 @@ async function connectWebSocket() {
         sendButton.style.display = 'block';
         adjustSendButtonPosition();
       }
-
-      // showSessionId(); // Função removida - não é necessária
-      afterUsernameDefined();
     };
 
     ws.onmessage = async (event) => {
@@ -655,39 +581,9 @@ async function connectWebSocket() {
 
           // Decodificar mensagem
           if (type === 'message' && innerData.message) {
-            let msg = null;
-            let erroPrivado = false;
-            // Se a mensagem tem campo 'to' e estou incluso, ativa grupo automaticamente
-            if (Array.isArray(innerData.to) && innerData.to.includes(mySessionId)) {
-              setPrivateSessionIds(innerData.to);
-              showNotification('Você entrou em um grupo privado!', true);
-            }
-            // Tenta descriptografar com chave privada do grupo
-            if (privateSessionIds.length > 0) {
-              let destinatarios = [...privateSessionIds];
-              if (!destinatarios.includes(mySessionId)) destinatarios.push(mySessionId);
-              let chavePrivada = CryptoJS.SHA256(destinatarios.sort().join("")).toString();
-              try {
-                msg = CryptoJS.AES.decrypt(innerData.message, chavePrivada).toString(CryptoJS.enc.Utf8);
-                if (!msg) erroPrivado = true;
-              } catch {
-                erroPrivado = true;
-              }
-            }
-            // Se não conseguiu, tenta como público (apenas se não for AES)
-            if (!msg && !erroPrivado) {
-              if (!innerData.message.startsWith('U2FsdGVkX1')) { // base64 de 'Salted__'
-                try {
-                  msg = simpleDecrypt(innerData.message);
-                } catch {
-                  // Ignora erro
-                }
-              }
-            }
-            if (msg) {
-              addMessageToChatbox(sender, msg);
-              notificationSound.play().catch(() => {});
-            }
+            const decryptedMessage = simpleDecrypt(innerData.message);
+            addMessageToChatbox(sender, decryptedMessage);
+            notificationSound.play().catch(() => {});
             return;
           }
         } else {
@@ -767,55 +663,78 @@ async function sendMessage() {
       nameInputBtn.style.display = 'block';
     }
     document.getElementById('message').blur();
+    
     const warningMessage = document.createElement('div');
     warningMessage.innerHTML = '<em>Por favor, defina seu nome antes de enviar mensagens</em>';
     document.getElementById('chatbox').appendChild(warningMessage);
     scrollToBottom();
     return;
   }
+  
   const messageInput = document.getElementById('message');
-  let msg = messageInput.value.trim();
-  let parsed = parsePrivateCommand(msg);
-  if (parsed !== null) {
-    if (parsed === "") return; // Só ativou/desativou sessão, não enviou mensagem
-    msg = parsed; // Mensagem real após os sessionIds
+  const message = messageInput.value.trim();
+  if (message === "") return;
+
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.log('WebSocket não está conectado. Tentando reconectar...');
+    const reconnectMessage = document.createElement('div');
+    reconnectMessage.innerHTML = '<em>Reconectando ao chat...</em>';
+    document.getElementById('chatbox').appendChild(reconnectMessage);
+    scrollToBottom();
+    
+    try {
+      await connectWebSocket();
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    } catch (error) {
+      console.error('Erro ao reconectar:', error);
+      const errorMessage = document.createElement('div');
+      errorMessage.innerHTML = '<em>Erro ao conectar ao chat. Tente novamente.</em>';
+      document.getElementById('chatbox').appendChild(errorMessage);
+      scrollToBottom();
+      return;
+    }
   }
-  // Se estiver em modo privado, criptografa para o grupo
-  let destinatarios = privateSessionIds.length > 0 ? [...privateSessionIds] : null;
-  let chavePrivada = null;
-  if (destinatarios) {
-    if (!destinatarios.includes(mySessionId)) destinatarios.push(mySessionId);
-    chavePrivada = CryptoJS.SHA256(destinatarios.sort().join("")).toString();
-  }
-  let encryptedMessage;
-  if (chavePrivada) {
-    encryptedMessage = CryptoJS.AES.encrypt(msg, chavePrivada).toString();
-  } else {
+
+  try {
+    // Gerar uma chave única para esta mensagem
     const messageKey = generateSimpleKey();
-    encryptedMessage = simpleEncrypt(msg, messageKey);
+    
+    // Criptografar a mensagem
+    const encryptedMessage = simpleEncrypt(message, messageKey);
+
+    // Montar o JSON original
+    const originalData = {
+      type: btoa('message'),
+      sessionId: btoa(sessionId),
+      sender: btoa(username),
+      message: encryptedMessage,
+      timestamp: Date.now()
+    };
+
+    // Criptografar o JSON inteiro e enviar como payload
+    const encryptedPayload = await encryptData(JSON.stringify(originalData));
+    const finalMessage = JSON.stringify({ payload: encryptedPayload });
+    console.log('Enviando mensagem criptografada:', finalMessage.substring(0, 100) + '...');
+    ws.send(finalMessage);
+
+    // Mostrar mensagem localmente
+    addMessageToChatbox(username, message);
+
+    // Limpar e focar o input
+    messageInput.value = '';
+    const sendButton = document.getElementById('send');
+    if (sendButton) {
+      sendButton.disabled = true;
+      sendButton.style.display = "none";
+    }
+    messageInput.focus();
+  } catch (error) {
+    console.error('Erro ao enviar mensagem:', error);
+    const errorMessage = document.createElement('div');
+    errorMessage.innerHTML = '<em>Erro ao enviar mensagem. Tente novamente.</em>';
+    document.getElementById('chatbox').appendChild(errorMessage);
+    scrollToBottom();
   }
-  // Atualiza mapeamento local
-  sessionIdToUsername[mySessionId] = username;
-  updateSessionIdList();
-  const originalData = {
-    type: btoa('message'),
-    sessionId: btoa(sessionId),
-    sender: btoa(username),
-    message: encryptedMessage,
-    timestamp: Date.now(),
-    to: destinatarios ? destinatarios : undefined // Opcional
-  };
-  const encryptedPayload = await encryptData(JSON.stringify(originalData));
-  const finalMessage = JSON.stringify({ payload: encryptedPayload });
-  ws.send(finalMessage);
-  addMessageToChatbox(username, msg);
-  messageInput.value = '';
-  const sendButton = document.getElementById('send');
-  if (sendButton) {
-    sendButton.disabled = true;
-    sendButton.style.display = "none";
-  }
-  messageInput.focus();
 }
 
 // Função para rolar o chat para a última mensagem
@@ -920,8 +839,6 @@ function adjustSendButtonPosition() {
           console.log('Reconectando WebSocket após definir nome...');
           connectWebSocket();
         }
-
-        updateSessionIdList();
       }
     };
 
@@ -973,10 +890,7 @@ function adjustSendButtonPosition() {
     nameInputButton.style.display = 'none';
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       console.log('Iniciando conexão WebSocket...');
-      // Pequeno delay para garantir que a página esteja carregada
-      setTimeout(() => {
-        connectWebSocket();
-      }, 100);
+      connectWebSocket();
     }
   } else {
     console.log('Nome de usuário não definido');
@@ -1130,7 +1044,7 @@ async function getClientIP() {
 async function checkRateLimit() {
     const now = Date.now();
     const clientIP = await getClientIP();
-    const mode = await getOperationMode();
+    const mode = getOperationMode();
     
     // Reset contadores globais a cada minuto
     if (now - lastRequestReset >= 60000) {
@@ -1309,49 +1223,29 @@ async function decompressData(blob) {
 }
 
 // Função para verificar modo de operação
-async function getOperationMode() {
-    try {
-        const response = await fetch('/mode');
-        if (response.ok) {
-            const modeText = await response.text();
-            if (modeText && typeof modeText === 'string') {
-                return modeText.trim();
-            }
-        }
-    } catch (error) {
-        console.warn('Erro ao obter modo de operação, usando fallback:', error);
-    }
-    
-    // Fallback: detectar pelo hostname
-    const hostname = window.location.hostname;
-    if (hostname === '4.3.2.1') {
-      return 'AP';
-    } else {
-      // Qualquer outro IP é considerado STA ou AP+STA
-      return 'STA';
-    }
+function getOperationMode() {
+    return window.location.hostname === '4.3.2.1' ? 'AP' : 'STA';
 }
 
 // Função para obter chave de operação
-async function getOperationKey() {
-    const mode = await getOperationMode();
-    return mode === 'AP' ? SECURITY_CONFIG.AP_MODE_KEY : SECURITY_CONFIG.STA_MODE_KEY;
+function getOperationKey() {
+    return getOperationMode() === 'AP' ? SECURITY_CONFIG.AP_MODE_KEY : SECURITY_CONFIG.STA_MODE_KEY;
 }
 
 // Função melhorada de requisição segura
 async function secureHttpRequest(url, data) {
     try {
-            // Verificar rate limiting
-    await checkRateLimit();
-    
-    // Preparar dados seguros
-    const secureData = {
-        version: SECURITY_CONFIG.ENCRYPTION_VERSION,
-        timestamp: Date.now(),
-        nonce: generateNonce(),
-        mode: await getOperationMode(),
-        data: data
-    };
+        // Verificar rate limiting
+        await checkRateLimit();
+        
+        // Preparar dados seguros
+        const secureData = {
+            version: SECURITY_CONFIG.ENCRYPTION_VERSION,
+            timestamp: Date.now(),
+            nonce: generateNonce(),
+            mode: getOperationMode(),
+            data: data
+        };
         
         // Criptografar dados usando XOR (mais compatível)
         const encryptedData = await encryptData(JSON.stringify(secureData));
@@ -1397,149 +1291,4 @@ async function secureHttpRequest(url, data) {
         }
         throw error;
     }
-}
-
-// Função para atualizar UI após definir nome
-function afterUsernameDefined() {
-  sessionIdToUsername[mySessionId] = username;
-  updateSessionIdList();
-  showPrivateModeBanner();
-}
-
-// Opcional: Atualizar sessionId exibido se mudar
-function updateSessionIdDisplay() {
-  let el = document.getElementById('sessionid-value');
-  if (el) el.textContent = obfuscateSessionId(mySessionId);
-}
-
-function copySessionIdToClipboard() {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(mySessionId)
-      .then(() => showNotification('sessionId copiado!', true))
-      .catch(() => fallbackCopySessionId());
-  } else {
-    fallbackCopySessionId();
-  }
-}
-
-// Função para mostrar aviso visual de modo privado
-function showPrivateModeBanner() {
-  let old = document.getElementById('private-mode-banner');
-  if (old) old.remove();
-  if (privateSessionIds.length > 0) {
-    let nomes = privateSessionIds.map(sid => sessionIdToUsername[sid] || obfuscateSessionId(sid)).join(', ');
-    const div = document.createElement('div');
-    div.id = 'private-mode-banner';
-    div.style = 'margin: 10px 0; padding: 8px; background: #ffe8e8; border-radius: 6px; color: #b00; font-weight: bold; font-size: 15px;';
-    div.innerHTML = `🔒 Modo privado: <span style="color:#333">${nomes}</span> <button id="exit-private-btn">Sair</button>`;
-    const chatbox = document.getElementById('chatbox');
-    chatbox.parentNode.insertBefore(div, chatbox);
-    document.getElementById('exit-private-btn').onclick = function() {
-      setPrivateSessionIds([]);
-      showNotification('Você voltou ao chat público.', true);
-    };
-  }
-}
-
-// Atualizar banner e lista sempre que mudar sessão
-function updatePrivacyUI() {
-  showPrivateModeBanner();
-  updateSessionIdList();
-}
-
-// Função para atualizar privateSessionIds e garantir banner
-function setPrivateSessionIds(ids) {
-  privateSessionIds = ids;
-  showPrivateModeBanner();
-}
-
-// Modificar parsePrivateCommand para usar setPrivateSessionIds
-function parsePrivateCommand(msg) {
-  if (msg.startsWith("@")) {
-    if (msg.startsWith("@sair")) {
-      setPrivateSessionIds([]);
-      showNotification("Você voltou ao chat público.", true);
-      return "";
-    }
-    // Extrai sessionIds do início da mensagem
-    let ids = [];
-    let rest = msg;
-    while (rest.startsWith("@")) {
-      rest = rest.slice(1);
-      let nextAt = rest.indexOf("@");
-      let space = rest.indexOf(" ");
-      if (space === -1 && nextAt === -1) {
-        ids.push(rest);
-        rest = "";
-        break;
-      }
-      if (nextAt !== -1 && (space === -1 || nextAt < space)) {
-        ids.push(rest.slice(0, nextAt));
-        rest = rest.slice(nextAt);
-      } else {
-        ids.push(rest.slice(0, space));
-        rest = rest.slice(space + 1);
-        break;
-      }
-    }
-    if (ids.length > 0) {
-      setPrivateSessionIds(ids);
-      showNotification("Modo privado ativado para: " + ids.join(", "), true);
-      return rest.trim();
-    }
-  }
-  return null;
-}
-
-// Função para atualizar lista de sessionIds ativos no chat
-function updateSessionIdList() {
-  let old = document.getElementById('sessionid-list');
-  if (old) old.remove();
-  const div = document.createElement('div');
-  div.id = 'sessionid-list';
-  div.style = 'margin: 0px 0; padding: 8px; background: #e8f4ff; border-radius: 6px; font-size: 13px;';
-  let html = '<b>SessionIds ativos:</b><ul style="margin:0;padding-left:18px;">';
-  for (const [sid, uname] of Object.entries(sessionIdToUsername)) {
-    html += `<li><span style="font-family:monospace;">${sid}</span> <b>(${uname})</b> <button class="copy-sessionid-any-btn" data-sid="${sid}">Copiar</button></li>`;
-  }
-  html += '</ul>';
-  div.innerHTML = html;
-  const chatbox = document.getElementById('chatbox');
-  chatbox.parentNode.insertBefore(div, chatbox.nextSibling);
-  // Adiciona evento aos botões Copiar
-  div.querySelectorAll('.copy-sessionid-any-btn').forEach(btn => {
-    btn.onclick = function() {
-      copyAnySessionIdToClipboard(this.getAttribute('data-sid'));
-    };
-  });
-}
-
-// Função para ofuscar sessionId (exibe só os 8 primeiros caracteres + ...)
-function obfuscateSessionId(id) {
-  if (!id) return '';
-  return id.substring(0, 8) + (id.length > 10 ? '...' : '');
-}
-
-// Função para copiar qualquer sessionId (usada na lista)
-function copyAnySessionIdToClipboard(sid) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(sid)
-      .then(() => showNotification('sessionId copiado!', true))
-      .catch(() => fallbackCopySessionId(sid));
-  } else {
-    fallbackCopySessionId(sid);
-  }
-}
-function fallbackCopySessionId(sid) {
-  try {
-    const tempInput = document.createElement('input');
-    tempInput.value = sid;
-    document.body.appendChild(tempInput);
-    tempInput.select();
-    document.execCommand('copy');
-    document.body.removeChild(tempInput);
-    showNotification('sessionId copiado!', true);
-  } catch {
-    showNotification('Não foi possível copiar o sessionId.', false);
-  }
 }
